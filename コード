@@ -1,0 +1,256 @@
+/**
+ * Webアプリのメインエントリーポイント
+ */
+function doGet(e) {
+  return HtmlService.createTemplateFromFile("index")
+    .evaluate()
+    .setTitle("ナカノ企画書 2025 Autumn&Winter Collection")
+    .addMetaTag("viewport", "width=device-width, initial-scale=1.0");
+}
+
+/**
+ * 画像URLマップを作成してキャッシュする
+ */
+function getImageUrlMap() {
+  const cache = CacheService.getScriptCache();
+  const CACHE_KEY = "IMAGE_URL_MAP_V5"; // ★★★ キャッシュキーを変更して強制更新 ★★★
+  const CACHE_TIMEOUT_SECONDS = 3600; 
+
+  let cachedMap = cache.get(CACHE_KEY);
+  if (cachedMap) {
+    return JSON.parse(cachedMap);
+  }
+
+  Logger.log("画像URLマップのキャッシュを再構築します...");
+  const imageUrlMap = {};
+  
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const photoSheet = ss.getSheetByName("写真");
+    if (!photoSheet) return {};
+    
+    const photoLastRow = photoSheet.getLastRow();
+    if (photoLastRow < 2) return {};
+    
+    const photoValues = photoSheet.getRange(2, 1, photoLastRow - 1, 4).getValues(); 
+    
+    let imageFolderName = null;
+    for (const row of photoValues) {
+      const path = row[3]; // D列
+      if (path && typeof path === 'string' && path.includes('/')) {
+        // 例: "写真_Images/..." -> "写真_Images" を取得
+        imageFolderName = path.split('/')[0];
+        break;
+      }
+    }
+
+    if (!imageFolderName) {
+      Logger.log("画像フォルダ名が特定できませんでした。");
+      return {};
+    }
+    
+    // ★★★ フォルダ特定の精度向上 ★★★
+    // まず「スプレッドシートと同じフォルダ」内を探す (AppSheetの標準的な構成)
+    let imageFolder = null;
+    try {
+      const ssFile = DriveApp.getFileById(ss.getId());
+      const parents = ssFile.getParents();
+      while (parents.hasNext()) {
+        const parent = parents.next();
+        const folders = parent.getFoldersByName(imageFolderName);
+        if (folders.hasNext()) {
+          imageFolder = folders.next();
+          Logger.log(`Spreadsheetと同じ階層に画像フォルダ "${imageFolderName}" を発見しました。`);
+          break;
+        }
+      }
+    } catch (e) {
+      Logger.log("親フォルダ検索エラー: " + e.message);
+    }
+
+    // 見つからなければドライブ全体から探す (予備)
+    if (!imageFolder) {
+      Logger.log("親階層に見つからないため、ドライブ全体から検索します。");
+      const folders = DriveApp.getFoldersByName(imageFolderName);
+      if (folders.hasNext()) {
+        imageFolder = folders.next();
+      }
+    }
+
+    if (!imageFolder) {
+       Logger.log(`画像フォルダ "${imageFolderName}" が見つかりません。`);
+       return {};
+    }
+    
+    const files = imageFolder.getFiles();
+    
+    while (files.hasNext()) {
+      const file = files.next();
+      const fileName = file.getName();
+      
+      // ★★★ 修正ポイント: AppSheetのファイル名形式に対応 ★★★
+      // 例: "6dda74fb.写真.113759.jpg" -> 最初のドットまでを取得 -> "6dda74fb"
+      const idPart = fileName.split('.')[0].trim();
+      
+      if (idPart) {
+        imageUrlMap[idPart] = file.getId();
+      }
+    }
+
+    cache.put(CACHE_KEY, JSON.stringify(imageUrlMap), CACHE_TIMEOUT_SECONDS);
+    return imageUrlMap;
+
+  } catch (err) {
+    Logger.log("getImageUrlMap Error: " + err.message);
+    return {};
+  }
+}
+
+/**
+ * 商品データを取得する
+ */
+function getProductData() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    
+    const kikakuSheet = ss.getSheetByName("企画管理");
+    const colorSheet = ss.getSheetByName("カラー");
+    const sizeSheet = ss.getSheetByName("サイズ");
+    const photoSheet = ss.getSheetByName("写真");
+    const fabricSheet = ss.getSheetByName("生地");
+    
+    const kikakuLastRow = kikakuSheet.getLastRow();
+    const colorLastRow = colorSheet.getLastRow();
+    const sizeLastRow = sizeSheet.getLastRow();
+    const photoLastRow = photoSheet.getLastRow();
+    const fabricLastRow = fabricSheet.getLastRow();
+
+    const KIKAKU_MAX_COL = 13; 
+    const kikakuValues = (kikakuLastRow > 1) ? kikakuSheet.getRange(2, 1, kikakuLastRow - 1, KIKAKU_MAX_COL).getValues() : [];
+    
+    const colorValues = (colorLastRow > 1) ? colorSheet.getRange(2, 1, colorLastRow - 1, 3).getValues() : [];
+    const sizeValues = (sizeLastRow > 1) ? sizeSheet.getRange(2, 1, sizeLastRow - 1, 2).getValues() : [];
+    const photoValues = (photoLastRow > 1) ? photoSheet.getRange(2, 1, photoLastRow - 1, 4).getValues() : [];
+    const fabricValues = (fabricLastRow > 1) ? fabricSheet.getRange(2, 1, fabricLastRow - 1, 4).getValues() : [];
+
+    const imageUrlMap = getImageUrlMap();
+
+    // 列定義
+    const KIKAKU_MAP = {
+      kanriId: 0, shinchoku: 1, hinban: 4, hinmei: 5, 
+      season: 6, category: 8, jodai: 11, gedai: 12,
+    };
+    const COLOR_MAP = { kanriId: 0, colorName: 2 };
+    const SIZE_MAP = { kanriId: 0, size: 1 };
+    const PHOTO_MAP = { kanriId: 0, shashinId: 1 };
+    const FABRIC_MAP = { kanriId: 0, kijiBango: 1, kijiName: 2, konritsu: 3 };
+
+    // --- マップ作成 ---
+
+    const colorsMap = colorValues.reduce((acc, row) => {
+      const id = row[COLOR_MAP.kanriId];
+      if (id) {
+        if (!acc[id]) acc[id] = [];
+        acc[id].push(row[COLOR_MAP.colorName]);
+      }
+      return acc;
+    }, {});
+
+    const sizesMap = sizeValues.reduce((acc, row) => {
+      const id = row[SIZE_MAP.kanriId];
+      if (id) {
+        if (!acc[id]) acc[id] = [];
+        acc[id].push(row[SIZE_MAP.size]);
+      }
+      return acc;
+    }, {});
+
+    const photosMap = photoValues.reduce((acc, row) => {
+      const id = row[PHOTO_MAP.kanriId];
+      const shashinId = row[PHOTO_MAP.shashinId];
+      // ★★★ IDのトリミングを追加 ★★★
+      const cleanShashinId = shashinId ? String(shashinId).trim() : "";
+      
+      if (id && cleanShashinId) {
+        if (!acc[id]) acc[id] = [];
+        if (!acc[id].includes(cleanShashinId)) {
+            acc[id].push(cleanShashinId);
+        }
+      }
+      return acc;
+    }, {});
+
+    const fabricsMap = fabricValues.reduce((acc, row) => {
+      const id = row[FABRIC_MAP.kanriId];
+      if (id && !acc[id]) {
+        acc[id] = {
+          number: row[FABRIC_MAP.kijiBango],
+          name: row[FABRIC_MAP.kijiName],
+          composition: row[FABRIC_MAP.konritsu]
+        };
+      }
+      return acc;
+    }, {});
+
+    // --- データ組み立て ---
+    const productData = [];
+    
+    for (const row of kikakuValues) {
+      const kanriId = row[KIKAKU_MAP.kanriId];
+      if (!kanriId) continue;
+
+      const fabricInfo = fabricsMap[kanriId] || {};
+      
+      const shashinIds = photosMap[kanriId] || [];
+      const imageUrls = [];
+      
+      if (shashinIds.length > 0) {
+        shashinIds.forEach(sid => {
+            const fileId = imageUrlMap[sid]; // sidはcleanShashinId
+            if (fileId) {
+                imageUrls.push(`https://drive.google.com/uc?id=${fileId}`);
+            }
+        });
+      }
+      
+      // 画像がない場合のプレースホルダー
+      if (imageUrls.length === 0) {
+        // "No Image" テキストを表示するためのダミーURL (フロントエンドでエラーハンドリングさせる)
+        // あるいは明示的なプレースホルダー画像URL
+        imageUrls.push("https://placehold.co/400x400/f3f4f6/9ca3af?text=No+Image");
+      }
+
+      const cleanPrice = (v) => {
+        if (typeof v === 'number') return v;
+        if (typeof v === 'string') return parseFloat(v.replace(/[¥,]/g, '')) || 0;
+        return 0;
+      };
+      
+      const product = {
+        id: row[KIKAKU_MAP.hinban] || kanriId,
+        kanriId: kanriId, 
+        category: row[KIKAKU_MAP.category] || "N/A",
+        season: row[KIKAKU_MAP.season] || "N/A",
+        name: row[KIKAKU_MAP.hinmei] || "（品名未設定）",
+        status: row[KIKAKU_MAP.shinchoku] || "N/A",
+        colors: colorsMap[kanriId] || [],
+        price_retail: cleanPrice(row[KIKAKU_MAP.jodai]),
+        price_wholesale: cleanPrice(row[KIKAKU_MAP.gedai]),
+        material_name: fabricInfo.name || "N/A",
+        composition: fabricInfo.composition || "N/A",
+        sizes: sizesMap[kanriId] || [],
+        fabric_number: fabricInfo.number || "N/A",
+        images: imageUrls, 
+        imageUrl: imageUrls[0] 
+      };
+      
+      productData.push(product);
+    }
+
+    return productData;
+
+  } catch (err) {
+    Logger.log("Error in getProductData: " + err);
+    return { error: `Error: ${err.message}` };
+  }
+}
