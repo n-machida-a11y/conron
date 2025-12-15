@@ -10,14 +10,17 @@ function doGet(e) {
 
 /**
  * 画像URLマップを作成してキャッシュする
+ * シート名: 絵型 (旧: 写真)
  */
 function getImageUrlMap() {
   const cache = CacheService.getScriptCache();
-  const CACHE_KEY = "IMAGE_URL_MAP_V5"; // ★★★ キャッシュキーを変更して強制更新 ★★★
+  // ★キャッシュキーを再変更し、確実にマップを再作成させます
+  const CACHE_KEY = "IMAGE_URL_MAP_V9_DEBUG_LOG"; // デバッグ用にキーを更新
   const CACHE_TIMEOUT_SECONDS = 3600; 
 
   let cachedMap = cache.get(CACHE_KEY);
   if (cachedMap) {
+    Logger.log("画像URLマップ: キャッシュを使用しました。");
     return JSON.parse(cachedMap);
   }
 
@@ -26,8 +29,11 @@ function getImageUrlMap() {
   
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const photoSheet = ss.getSheetByName("写真");
-    if (!photoSheet) return {};
+    const photoSheet = ss.getSheetByName("絵型");
+    if (!photoSheet) {
+      Logger.log("シート「絵型」が見つかりませんでした。");
+      return {};
+    }
     
     const photoLastRow = photoSheet.getLastRow();
     if (photoLastRow < 2) return {};
@@ -36,9 +42,8 @@ function getImageUrlMap() {
     
     let imageFolderName = null;
     for (const row of photoValues) {
-      const path = row[3]; // D列
+      const path = row[3]; 
       if (path && typeof path === 'string' && path.includes('/')) {
-        // 例: "写真_Images/..." -> "写真_Images" を取得
         imageFolderName = path.split('/')[0];
         break;
       }
@@ -49,8 +54,9 @@ function getImageUrlMap() {
       return {};
     }
     
-    // ★★★ フォルダ特定の精度向上 ★★★
-    // まず「スプレッドシートと同じフォルダ」内を探す (AppSheetの標準的な構成)
+    Logger.log(`特定された画像フォルダ名: ${imageFolderName}`);
+    
+    // フォルダ特定のロジックは変更なし
     let imageFolder = null;
     try {
       const ssFile = DriveApp.getFileById(ss.getId());
@@ -60,7 +66,7 @@ function getImageUrlMap() {
         const folders = parent.getFoldersByName(imageFolderName);
         if (folders.hasNext()) {
           imageFolder = folders.next();
-          Logger.log(`Spreadsheetと同じ階層に画像フォルダ "${imageFolderName}" を発見しました。`);
+          Logger.log(`成功: Spreadsheetと同じ階層に画像フォルダ "${imageFolderName}" を発見しました。`);
           break;
         }
       }
@@ -68,17 +74,17 @@ function getImageUrlMap() {
       Logger.log("親フォルダ検索エラー: " + e.message);
     }
 
-    // 見つからなければドライブ全体から探す (予備)
     if (!imageFolder) {
       Logger.log("親階層に見つからないため、ドライブ全体から検索します。");
       const folders = DriveApp.getFoldersByName(imageFolderName);
       if (folders.hasNext()) {
         imageFolder = folders.next();
+        Logger.log(`成功: ドライブ全体から画像フォルダ "${imageFolderName}" を発見しました。`);
       }
     }
 
     if (!imageFolder) {
-       Logger.log(`画像フォルダ "${imageFolderName}" が見つかりません。`);
+       Logger.log(`失敗: 画像フォルダ "${imageFolderName}" が見つかりません。`);
        return {};
     }
     
@@ -88,12 +94,28 @@ function getImageUrlMap() {
       const file = files.next();
       const fileName = file.getName();
       
-      // ★★★ 修正ポイント: AppSheetのファイル名形式に対応 ★★★
-      // 例: "6dda74fb.写真.113759.jpg" -> 最初のドットまでを取得 -> "6dda74fb"
-      const idPart = fileName.split('.')[0].trim();
+      // ★修正ポイント: より柔軟なキー抽出ロジックを導入
+      let idPart = null;
+
+      // 1. ドット区切りがある場合 (AppSheet形式: XXXXXX.png.YYY.jpg)
+      const parts = fileName.split('.');
+      if (parts.length > 1) {
+          idPart = parts[0].trim();
+      }
+      
+      // 2. 拡張子だけがある場合 (直接アップロード形式: XXXXXX.png)
+      // ドットが1つだけ、かつID部分がまだ未設定の場合に、拡張子を除いたファイル名全体をキーにする
+      if (!idPart && parts.length <= 2) {
+          idPart = parts[0].trim();
+      }
       
       if (idPart) {
-        imageUrlMap[idPart] = file.getId();
+        // キーに拡張子が含まれないように再度処理
+        const cleanIdPart = idPart.split('.')[0].trim();
+        if (cleanIdPart) {
+            imageUrlMap[cleanIdPart] = file.getId();
+            Logger.log(`マップ登録: ファイル名 "${fileName}" -> キー "${cleanIdPart}"`); // ★デバッグログ追加
+        }
       }
     }
 
@@ -113,40 +135,70 @@ function getProductData() {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     
+    // シート名と取得
     const kikakuSheet = ss.getSheetByName("企画管理");
     const colorSheet = ss.getSheetByName("カラー");
     const sizeSheet = ss.getSheetByName("サイズ");
-    const photoSheet = ss.getSheetByName("写真");
-    const fabricSheet = ss.getSheetByName("生地");
-    
-    const kikakuLastRow = kikakuSheet.getLastRow();
-    const colorLastRow = colorSheet.getLastRow();
-    const sizeLastRow = sizeSheet.getLastRow();
-    const photoLastRow = photoSheet.getLastRow();
-    const fabricLastRow = fabricSheet.getLastRow();
+    const photoSheet = ss.getSheetByName("絵型");
+    // const fabricSheet = ss.getSheetByName("生地"); // 生地シートは不要
 
-    const KIKAKU_MAX_COL = 13; 
+    // 必須シートの存在チェック
+    if (!kikakuSheet) {
+      throw new Error("スプレッドシート内に「企画管理」シートが見つかりませんでした。");
+    }
+    
+    // データ最終行の取得
+    const kikakuLastRow = kikakuSheet.getLastRow();
+    // 必須ではないシートは、存在しない場合は空の配列で代用できるように調整
+    const colorLastRow = colorSheet ? colorSheet.getLastRow() : 1;
+    const sizeLastRow = sizeSheet ? sizeSheet.getLastRow() : 1;
+    const photoLastRow = photoSheet ? photoSheet.getLastRow() : 1;
+
+    // 企画管理の列数を15列に更新
+    const KIKAKU_MAX_COL = 15; 
     const kikakuValues = (kikakuLastRow > 1) ? kikakuSheet.getRange(2, 1, kikakuLastRow - 1, KIKAKU_MAX_COL).getValues() : [];
     
-    const colorValues = (colorLastRow > 1) ? colorSheet.getRange(2, 1, colorLastRow - 1, 3).getValues() : [];
-    const sizeValues = (sizeLastRow > 1) ? sizeSheet.getRange(2, 1, sizeLastRow - 1, 2).getValues() : [];
-    const photoValues = (photoLastRow > 1) ? photoSheet.getRange(2, 1, photoLastRow - 1, 4).getValues() : [];
-    const fabricValues = (fabricLastRow > 1) ? fabricSheet.getRange(2, 1, fabricLastRow - 1, 4).getValues() : [];
+    // データ取得（シートが存在しない場合は空の配列を返す）
+    const colorValues = (colorLastRow > 1 && colorSheet) ? colorSheet.getRange(2, 1, colorLastRow - 1, 3).getValues() : [];
+    const sizeValues = (sizeLastRow > 1 && sizeSheet) ? sizeSheet.getRange(2, 1, sizeLastRow - 1, 2).getValues() : [];
+    const photoValues = (photoLastRow > 1 && photoSheet) ? photoSheet.getRange(2, 1, photoLastRow - 1, 4).getValues() : [];
 
     const imageUrlMap = getImageUrlMap();
 
-    // 列定義
+    // 新しい企画管理の列定義に基づくマッピング (0-indexed)
+    // [管理ID(0), 仮品番(1), 定番/外注(2), 品番(3), 品名(4), シーズン(5), ブランド(6), カテゴリー(7), サイズ(8),
+    // 上代(9), 下代(10), 生地番号(11), 生地名(12), 進捗(13), 仕様書担当者(14)]
     const KIKAKU_MAP = {
-      kanriId: 0, shinchoku: 1, hinban: 4, hinmei: 5, 
-      season: 6, category: 8, jodai: 11, gedai: 12,
+      kanriId: 0,       // 管理ID
+      shinchoku: 13,    // 進捗 (13)
+      hinban: 3,        // 品番 (商品IDとして使用)
+      hinmei: 4,        // 品名
+      season: 5,        // シーズン
+      category: 7,      // カテゴリー
+      jodai: 9,         // 上代 (9)
+      gedai: 10,        // 下代 (10)
+      fabric_number: 11, // 生地番号 (11)
+      material_name: 12  // 生地名 (12)
     };
-    const COLOR_MAP = { kanriId: 0, colorName: 2 };
-    const SIZE_MAP = { kanriId: 0, size: 1 };
-    const PHOTO_MAP = { kanriId: 0, shashinId: 1 };
-    const FABRIC_MAP = { kanriId: 0, kijiBango: 1, kijiName: 2, konritsu: 3 };
+    
+    // [カラー番号, 管理ID, カラー名]
+    const COLOR_MAP = { 
+      kanriId: 1,       // 管理ID (B列)
+      colorName: 2      // カラー名 (C列)
+    }; 
+    
+    // [管理ID, サイズ名] (変更なしと仮定)
+    const SIZE_MAP = { kanriId: 0, size: 1 }; 
 
-    // --- マップ作成 ---
+    // [絵型ID, 管理ID, タイトル, 写真(Path)]
+    const PHOTO_MAP = { 
+      kanriId: 1,       // 管理ID (B列)
+      shashinId: 0      // 絵型ID (A列, 画像ファイルIDのキーとして使用)
+    };
+    
+    // FABRIC_MAPは不要
 
+    // --- マップ作成 (カラー) ---
     const colorsMap = colorValues.reduce((acc, row) => {
       const id = row[COLOR_MAP.kanriId];
       if (id) {
@@ -156,6 +208,7 @@ function getProductData() {
       return acc;
     }, {});
 
+    // --- マップ作成 (サイズ) --- (ロジック変更なし)
     const sizesMap = sizeValues.reduce((acc, row) => {
       const id = row[SIZE_MAP.kanriId];
       if (id) {
@@ -165,10 +218,11 @@ function getProductData() {
       return acc;
     }, {});
 
+    // --- マップ作成 (絵型/写真) ---
     const photosMap = photoValues.reduce((acc, row) => {
-      const id = row[PHOTO_MAP.kanriId];
-      const shashinId = row[PHOTO_MAP.shashinId];
-      // ★★★ IDのトリミングを追加 ★★★
+      const id = row[PHOTO_MAP.kanriId];           // B列: 管理ID
+      const shashinId = row[PHOTO_MAP.shashinId];   // A列: 絵型ID (ファイルID部分)
+      
       const cleanShashinId = shashinId ? String(shashinId).trim() : "";
       
       if (id && cleanShashinId) {
@@ -180,26 +234,20 @@ function getProductData() {
       return acc;
     }, {});
 
-    const fabricsMap = fabricValues.reduce((acc, row) => {
-      const id = row[FABRIC_MAP.kanriId];
-      if (id && !acc[id]) {
-        acc[id] = {
-          number: row[FABRIC_MAP.kijiBango],
-          name: row[FABRIC_MAP.kijiName],
-          composition: row[FABRIC_MAP.konritsu]
-        };
-      }
-      return acc;
-    }, {});
-
     // --- データ組み立て ---
     const productData = [];
+    
+    const cleanPrice = (v) => {
+      if (typeof v === 'number') return v;
+      if (typeof v === 'string') return parseFloat(v.replace(/[¥,]/g, '')) || 0;
+      return 0;
+    };
     
     for (const row of kikakuValues) {
       const kanriId = row[KIKAKU_MAP.kanriId];
       if (!kanriId) continue;
 
-      const fabricInfo = fabricsMap[kanriId] || {};
+      // const fabricInfo = fabricsMap[kanriId] || {}; // 削除
       
       const shashinIds = photosMap[kanriId] || [];
       const imageUrls = [];
@@ -208,24 +256,21 @@ function getProductData() {
         shashinIds.forEach(sid => {
             const fileId = imageUrlMap[sid]; // sidはcleanShashinId
             if (fileId) {
-                imageUrls.push(`https://drive.google.com/uc?id=${fileId}`);
+                // ★修正箇所: DriveApp.getFileById(fileId).getDownloadUrl() も使用可能だが、
+                // uc?id= が最も一般的。ただし、組織内アクセス制限のため、公開設定を回避する ?export=download を追加
+                // https://drive.google.com/uc?export=download&id={ファイルID} を使用する
+                imageUrls.push(`https://drive.google.com/uc?export=download&id=${fileId}`);
+            } else {
+                Logger.log(`注意: 管理ID ${kanriId} (絵型ID ${sid}) のファイルIDがマップに見つかりません。`); // ★デバッグログ追加
             }
         });
       }
       
       // 画像がない場合のプレースホルダー
       if (imageUrls.length === 0) {
-        // "No Image" テキストを表示するためのダミーURL (フロントエンドでエラーハンドリングさせる)
-        // あるいは明示的なプレースホルダー画像URL
         imageUrls.push("https://placehold.co/400x400/f3f4f6/9ca3af?text=No+Image");
       }
 
-      const cleanPrice = (v) => {
-        if (typeof v === 'number') return v;
-        if (typeof v === 'string') return parseFloat(v.replace(/[¥,]/g, '')) || 0;
-        return 0;
-      };
-      
       const product = {
         id: row[KIKAKU_MAP.hinban] || kanriId,
         kanriId: kanriId, 
@@ -234,12 +279,18 @@ function getProductData() {
         name: row[KIKAKU_MAP.hinmei] || "（品名未設定）",
         status: row[KIKAKU_MAP.shinchoku] || "N/A",
         colors: colorsMap[kanriId] || [],
+        
+        // 上代・下代を取得
         price_retail: cleanPrice(row[KIKAKU_MAP.jodai]),
         price_wholesale: cleanPrice(row[KIKAKU_MAP.gedai]),
-        material_name: fabricInfo.name || "N/A",
-        composition: fabricInfo.composition || "N/A",
+        
+        // 生地情報を企画管理シートから直接取得 (インデックス 11, 12)
+        material_name: row[KIKAKU_MAP.material_name] || "N/A",
+        // composition (混率) はN/Aに固定
+        composition: "N/A", 
         sizes: sizesMap[kanriId] || [],
-        fabric_number: fabricInfo.number || "N/A",
+        fabric_number: row[KIKAKU_MAP.fabric_number] || "N/A", // 生地番号(11)
+        
         images: imageUrls, 
         imageUrl: imageUrls[0] 
       };
@@ -250,7 +301,8 @@ function getProductData() {
     return productData;
 
   } catch (err) {
+    // throw Errorの場合も、ここでフロントエンドに返す
     Logger.log("Error in getProductData: " + err);
-    return { error: `Error: ${err.message}` };
+    return { error: `データの読み込み中にエラーが発生しました: ${err.message}` };
   }
 }
