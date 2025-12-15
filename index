@@ -575,7 +575,7 @@
                     if (p) {
                         card.className = 'cat-card';
                         card.dataset.id = p.id;
-                        // isLargeMode = (currentLayout === 'large')
+                        // isDenseMode = (currentLayout === 'dense')
                         // trueを渡すとフォントサイズ調整が無効化され、CSS定義の大きいフォントが使われる
                         card.innerHTML = createCardHTML(p, currentLayout === 'dense'); 
                     } else {
